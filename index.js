@@ -201,46 +201,59 @@ async function miningProcess(wallet, proxy, idx) {
   }
 }
 
+// 并发控制函数
+async function processWalletConcurrently(wallet, provider, walletIndex, proxies, swapCount) {
+  let proxyIndex = walletIndex % proxies.length;
+  let success = false;
+  let retryCount = 0;
+  
+  log('cyan', `📝 钱包 #${walletIndex + 1} 开始第 ${swapCount + 1}/5 次交易`);
+  
+  while (!success && retryCount < proxies.length) {
+    const proxy = proxies[proxyIndex];
+    const ok = await checkAndApproveToken(wallet, provider, walletIndex, proxy);
+    if (ok) {
+      success = await executeSwap(wallet, provider, walletIndex, swapCount + 1, proxy);
+    } else {
+      log('red', `❌ 钱包 #${walletIndex + 1} 余额检查失败，跳过此钱包`);
+      break;
+    }
+    if (!success) {
+      proxyIndex = (proxyIndex + 1) % proxies.length;
+      retryCount++;
+      log('yellow', `⚠️ 钱包 #${walletIndex + 1} 交易失败，尝试下一个代理 (${retryCount}/${proxies.length})`);
+    }
+  }
+  
+  if (!success) {
+    log('red', `❌ 钱包 #${walletIndex + 1} 所有代理都失败，跳过此钱包`);
+  }
+  
+  // 每次交易后随机休息1-8秒
+  const delay = 1000 + Math.random() * 7000;
+  log('yellow', `⏳ 钱包 #${walletIndex + 1} 等待 ${Math.round(delay / 1000)} 秒后继续...`);
+  await sleep(delay);
+  
+  return success;
+}
+
 async function startSwapSession(wallets, proxies, provider) {
   log('cyan', `🔁 开始一次 Swap 会话`);
   const startTime = Date.now();
   
-  for (let i = 0; i < wallets.length; i++) {
-    log('cyan', `🔹 开始处理钱包 #${i + 1}`);
+  // 将钱包分成5个一组
+  for (let i = 0; i < wallets.length; i += 5) {
+    const walletGroup = wallets.slice(i, i + 5);
+    log('cyan', `🔹 开始处理钱包组 ${i/5 + 1}`);
     
     // 每个钱包交易5次
     for (let swapCount = 0; swapCount < 5; swapCount++) {
-      let proxyIndex = i % proxies.length;
-      let success = false;
-      let retryCount = 0;
+      // 并发执行5个钱包的交易
+      const promises = walletGroup.map((wallet, index) => 
+        processWalletConcurrently(wallet, provider, i + index, proxies, swapCount)
+      );
       
-      log('cyan', `📝 开始第 ${swapCount + 1}/5 次交易`);
-      
-      while (!success && retryCount < proxies.length) {
-        const proxy = proxies[proxyIndex];
-        const ok = await checkAndApproveToken(wallets[i], provider, i, proxy);
-        if (ok) {
-          success = await executeSwap(wallets[i], provider, i, swapCount + 1, proxy);
-        } else {
-          log('red', '❌ 余额检查失败，跳过此钱包');
-          break;
-        }
-        if (!success) {
-          proxyIndex = (proxyIndex + 1) % proxies.length;
-          retryCount++;
-          log('yellow', `⚠️ 交易失败，尝试下一个代理 (${retryCount}/${proxies.length})`);
-        }
-      }
-      
-      if (!success) {
-        log('red', '❌ 所有代理都失败，跳过此钱包');
-        break;
-      }
-      
-      // 每次交易后随机休息1-8秒
-      const delay = 1000 + Math.random() * 7000;
-      log('yellow', `⏳ 等待 ${Math.round(delay / 1000)} 秒后继续...`);
-      await sleep(delay);
+      await Promise.all(promises);
     }
   }
   
@@ -248,7 +261,7 @@ async function startSwapSession(wallets, proxies, provider) {
   const elapsedTime = Date.now() - startTime;
   const waitTime = 24 * 60 * 60 * 1000 - elapsedTime;
   if (waitTime > 0) {
-    log('cyan', `⏳ 所有钱包交易完成，等待 ${Math.round(waitTime / 1000 / 60)} 分钟后开始下一轮`);
+    log('yellow', `⏳ 等待 ${Math.round(waitTime / 1000 / 60)} 分钟后开始下一轮交易`);
     await sleep(waitTime);
   }
 }
